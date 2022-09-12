@@ -74,7 +74,7 @@ export function addonV1Shim(directory: string, options: ShimOptions = {}) {
       } else {
         // if we're being used by a v2 addon, it also has this shim and will
         // forward our registration onward to ember-auto-import
-        (this.parent as EAI2Instance).registerV2Addon(this.name, directory);
+        (this as EAI2Instance).registerV2Addon(this.name, directory);
       }
 
       if (options.disabled) {
@@ -158,8 +158,12 @@ export function addonV1Shim(directory: string, options: ShimOptions = {}) {
       return isInside(directory, appInstance.project.root);
     },
 
-    registerV2Addon(name: string, root: string): void {
-      autoImportInstance!.registerV2Addon(name, root);
+    registerV2Addon(this: AddonInstance, name: string, root: string): void {
+      if (autoImportInstance) {
+        autoImportInstance.registerV2Addon(name, root);
+      } else {
+        (this.parent as EAI2Instance).registerV2Addon(name, root);
+      }
     },
   };
 }
