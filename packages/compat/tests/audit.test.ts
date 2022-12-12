@@ -1,10 +1,10 @@
-import { emberTemplateCompilerPath, Project } from '@embroider/test-support';
-import { AppMeta, NodeTemplateCompilerParams, throwOnWarnings } from '@embroider/core';
+import { emberTemplateCompiler } from '@embroider/test-support';
+import { Project } from 'scenario-tester';
+import { AppMeta, throwOnWarnings } from '@embroider/core';
 import merge from 'lodash/merge';
 import fromPairs from 'lodash/fromPairs';
 import { Audit, Finding } from '../src/audit';
 import CompatResolver from '../src/resolver';
-import { dirname, join } from 'path';
 import type { TransformOptions } from '@babel/core';
 import type { Options as InlinePrecompileOptions } from 'babel-plugin-ember-template-compilation';
 import { makePortable } from '@embroider/core/src/portable-babel-config';
@@ -15,7 +15,7 @@ describe('audit', function () {
   let app: Project;
 
   async function audit() {
-    app.writeSync();
+    await app.write();
     let audit = new Audit(app.baseDir);
     return await audit.run();
   }
@@ -25,51 +25,45 @@ describe('audit', function () {
 
     const resolvableExtensions = ['.js', '.hbs'];
 
-    let templateCompilerParams: NodeTemplateCompilerParams = {
-      compilerPath: emberTemplateCompilerPath(),
-      compilerChecksum: `mock-compiler-checksum${Math.random()}`,
-      EmberENV: {},
-      plugins: { ast: [] },
-      resolver: new CompatResolver({
-        root: app.baseDir,
-        modulePrefix: 'audit-this-app',
-        options: {
-          staticComponents: false,
-          staticHelpers: false,
-          staticModifiers: false,
-          allowUnsafeDynamicComponents: false,
-        },
-        activePackageRules: [],
-        adjustImportsOptions: {
-          renamePackages: {},
-          renameModules: {},
-          extraImports: [],
-          externalsDir: '/tmp/embroider-externals',
-          activeAddons: {},
-          relocatedFiles: {},
-          resolvableExtensions,
-          emberNeedsModulesPolyfill: true,
-          appRoot: '.',
-        },
-      }),
-    };
+    let resolver = new CompatResolver({
+      emberVersion: emberTemplateCompiler().version,
+      root: app.baseDir,
+      modulePrefix: 'audit-this-app',
+      options: {
+        staticComponents: true,
+        staticHelpers: true,
+        staticModifiers: true,
+        allowUnsafeDynamicComponents: false,
+      },
+      activePackageRules: [],
+      adjustImportsOptions: {
+        renamePackages: {},
+        renameModules: {},
+        extraImports: [],
+        externalsDir: '/tmp/embroider-externals',
+        activeAddons: {},
+        relocatedFiles: {},
+        resolvableExtensions,
+        appRoot: '.',
+      },
+    });
+
     let babel: TransformOptions = {
       babelrc: false,
       plugins: [],
     };
 
-    let hbsDepsPluginPath = join(
-      dirname(require.resolve('@embroider/core/package.json')),
-      'src/babel-plugin-inline-hbs-deps-node.js'
-    );
+    let transform = resolver.astTransformer();
+    if (!transform) {
+      throw new Error('bug: expected astTransformer');
+    }
 
-    babel.plugins!.push([hbsDepsPluginPath, { templateCompiler: templateCompilerParams }]);
-    babel.plugins!.push([
-      require.resolve('babel-plugin-ember-template-compilation'),
-      {
-        precompilerPath: hbsDepsPluginPath,
-      } as InlinePrecompileOptions,
-    ]);
+    let etcOptions: InlinePrecompileOptions = {
+      compilerPath: emberTemplateCompiler().path,
+      transforms: [transform],
+      enableLegacyModules: ['ember-cli-htmlbars'],
+    };
+    babel.plugins!.push([require.resolve('babel-plugin-ember-template-compilation'), etcOptions]);
 
     merge(app.files, {
       'index.html': `<script type="module" src="./app.js"></script>`,

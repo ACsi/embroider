@@ -95,8 +95,11 @@ export function allBabelVersions(params: {
   }
 }
 
-export function emberTemplateCompilerPath() {
-  return join(__dirname, 'vendor', 'ember-template-compiler.js');
+export function emberTemplateCompiler() {
+  return {
+    path: join(__dirname, 'vendor', 'ember-template-compiler.js'),
+    version: '4.8.1',
+  };
 }
 
 export function definesPattern(runtimeName: string, buildTimeName: string): RegExp {
@@ -107,6 +110,6 @@ export function definesPattern(runtimeName: string, buildTimeName: string): RegE
   );
 }
 
-export { Project } from './project';
-export { default as BuildResult } from './build';
 export { expectFilesAt, ExpectFile } from './file-assertions';
+export { Rebuilder } from './rebuilder';
+export { Transpiler } from './transpiler';

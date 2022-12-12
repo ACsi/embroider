@@ -6,7 +6,6 @@ import type { types as t } from '@babel/core';
 import { PackageCache, Package, V2Package, explicitRelative } from '@embroider/shared-internals';
 import { Memoize } from 'typescript-memoize';
 import { compile } from './js-handlebars';
-import { handleImportDeclaration } from './mini-modules-polyfill';
 import { ImportUtil } from 'babel-import-util';
 import { randomBytes } from 'crypto';
 import { outputFileSync, pathExistsSync, renameSync } from 'fs-extra';
@@ -41,7 +40,6 @@ export interface Options {
   };
   relocatedFiles: { [relativePath: string]: string };
   resolvableExtensions: string[];
-  emberNeedsModulesPolyfill: boolean;
   appRoot: string;
 }
 
@@ -260,14 +258,10 @@ function handleExternal(specifier: string, sourceFile: AdjustFile, opts: Options
   if (relocatedPkg) {
     // this file has been moved into another package (presumably the app).
 
-    // self-imports are legal in the app tree, even for v2 packages
-    if (packageName === pkg.name) {
-      return specifier;
-    }
-
     // first try to resolve from the destination package
     if (isResolvable(packageName, relocatedPkg, opts.appRoot)) {
-      if (!pkg.meta['auto-upgraded']) {
+      // self-imports are legal in the app tree, even for v2 packages.
+      if (!pkg.meta['auto-upgraded'] && packageName !== pkg.name) {
         throw new Error(
           `${pkg.name} is trying to import ${packageName} from within its app tree. This is unsafe, because ${pkg.name} can't control which dependencies are resolvable from the app`
         );
@@ -277,7 +271,8 @@ function handleExternal(specifier: string, sourceFile: AdjustFile, opts: Options
       // second try to resolve from the source package
       let targetPkg = isResolvable(packageName, pkg, opts.appRoot);
       if (targetPkg) {
-        if (!pkg.meta['auto-upgraded']) {
+        // self-imports are legal in the app tree, even for v2 packages.
+        if (!pkg.meta['auto-upgraded'] && packageName !== pkg.name) {
           throw new Error(
             `${pkg.name} is trying to import ${packageName} from within its app tree. This is unsafe, because ${pkg.name} can't control which dependencies are resolvable from the app`
           );
@@ -299,7 +294,10 @@ function handleExternal(specifier: string, sourceFile: AdjustFile, opts: Options
   }
 
   // auto-upgraded packages can fall back to the set of known active addons
-  if (pkg.meta['auto-upgraded'] && opts.activeAddons[packageName]) {
+  //
+  // v2 packages can fall back to the set of known active addons only to find
+  // themselves (which is needed due to app tree merging)
+  if ((pkg.meta['auto-upgraded'] || packageName === pkg.name) && opts.activeAddons[packageName]) {
     return explicitRelative(dirname(sourceFile.name), specifier.replace(packageName, opts.activeAddons[packageName]));
   }
 
@@ -386,7 +384,7 @@ export default function main(babel: typeof Babel) {
         exit(path: NodePath<t.Program>, state: State) {
           for (let child of path.get('body')) {
             if (child.isImportDeclaration() || child.isExportNamedDeclaration() || child.isExportAllDeclaration()) {
-              rewriteTopLevelImport(t, child, state);
+              rewriteTopLevelImport(child, state);
             }
           }
         },
@@ -445,7 +443,6 @@ export default function main(babel: typeof Babel) {
 }
 
 function rewriteTopLevelImport(
-  t: BabelTypes,
   path: NodePath<t.ImportDeclaration | t.ExportNamedDeclaration | t.ExportAllDeclaration>,
   state: State
 ) {
@@ -453,14 +450,6 @@ function rewriteTopLevelImport(
   const { source } = path.node;
   if (source === null || source === undefined) {
     return;
-  }
-
-  if (opts.emberNeedsModulesPolyfill && path.isImportDeclaration()) {
-    let replacement = handleImportDeclaration(t, path);
-    if (replacement) {
-      path.replaceWith(replacement);
-      return;
-    }
   }
 
   let specifier = adjustSpecifier(source.value, state.adjustFile, opts, false);

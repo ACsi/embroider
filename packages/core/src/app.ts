@@ -25,20 +25,15 @@ import Options from './options';
 import { MacrosConfig } from '@embroider/macros/src/node';
 import { PluginItem, TransformOptions } from '@babel/core';
 import { makePortable } from './portable-babel-config';
-import { TemplateCompilerPlugins } from '.';
-import type { NodeTemplateCompilerParams } from './template-compiler-node';
-import { Resolver } from './resolver';
 import { Options as AdjustImportsOptions } from './babel-plugin-adjust-imports';
 import { mangledEngineRoot } from './engine-mangler';
 import { AppFiles, Engine, EngineSummary, RouteFiles } from './app-files';
 import partition from 'lodash/partition';
 import mergeWith from 'lodash/mergeWith';
 import cloneDeep from 'lodash/cloneDeep';
-import type { Params as InlineBabelParams } from './babel-plugin-inline-hbs-node';
 import { PortableHint, maybeNodeModuleVersion } from './portable';
 import escapeRegExp from 'escape-string-regexp';
-import { getEmberExports } from './load-ember-template-compiler';
-import type { Options as InlinePrecompileOptions } from 'babel-plugin-ember-template-compilation';
+import type { Options as EtcOptions, Transform } from 'babel-plugin-ember-template-compilation';
 import type { Options as ColocationOptions } from '@embroider/shared-internals/src/template-colocation-plugin';
 
 export type EmberENV = unknown;
@@ -107,7 +102,7 @@ export interface AppAdapter<TreeNames> {
 
   // Path to a build-time Resolver module to be used during template
   // compilation.
-  templateResolver(): Resolver;
+  resolverTransform(): Transform | undefined;
 
   // describes the special module naming rules that we need to achieve
   // compatibility
@@ -116,7 +111,7 @@ export interface AppAdapter<TreeNames> {
   adjustImportsOptionsPath(): string;
 
   // The template preprocessor plugins that are configured in the app.
-  htmlbarsPlugins(): TemplateCompilerPlugins;
+  htmlbarsPlugins(): Transform[];
 
   // the app's preferred babel config. No need to worry about making it portable
   // yet, we will do that for you.
@@ -371,7 +366,7 @@ export class AppBuilder<TreeNames> {
   }
 
   @Memoize()
-  private babelConfig(templateCompilerParams: NodeTemplateCompilerParams, appFiles: Engine[]) {
+  private babelConfig(appFiles: Engine[]) {
     let babel = cloneDeep(this.adapter.babelConfig());
 
     if (!babel.plugins) {
@@ -385,39 +380,42 @@ export class AppBuilder<TreeNames> {
     // https://github.com/webpack/webpack/issues/12154
     babel.plugins.push(require.resolve('./rename-require-plugin'));
 
-    if (this.adapter.adjustImportsOptions().emberNeedsModulesPolyfill) {
-      // on older ember versions that need the modules-api-polyfill, we use our
-      // bespoke inline template compiler plugin.
-      babel.plugins.push([
-        join(__dirname, 'babel-plugin-inline-hbs-node.js'),
-        {
-          templateCompiler: templateCompilerParams,
-          stage: 3,
-        } as InlineBabelParams,
-      ]);
-    } else {
-      // on newer ember versions that don't need the modules-api-polyfill, we
-      // can compose with the newer babel-plugin-ember-template-compilation, and
-      // use a simpler plugin that only needs to handle inserting discovered
-      // dependencies.
-      babel.plugins.push([
-        join(__dirname, '../src/babel-plugin-inline-hbs-deps-node.js'),
-        { templateCompiler: templateCompilerParams },
-      ]);
-      babel.plugins.push([
-        require.resolve('babel-plugin-ember-template-compilation'),
-        {
-          precompilerPath: join(__dirname, '../src/babel-plugin-inline-hbs-deps-node.js'),
-        } as InlinePrecompileOptions,
-      ]);
-    }
+    babel.plugins.push([require.resolve('babel-plugin-ember-template-compilation'), this.etcOptions()]);
 
     // this is @embroider/macros configured for full stage3 resolution
     babel.plugins.push(...this.macrosConfig.babelPluginConfig());
 
     let colocationOptions: ColocationOptions = {
-      packageGuard: true,
       appRoot: this.root,
+
+      // This extra weirdness is a compromise in favor of build performance.
+      //
+      // 1. When auto-upgrading an addon from v1 to v2, we definitely want to
+      //    run any custom AST transforms in stage1.
+      //
+      // 2. In general case, AST transforms are allowed to manipulate Javascript
+      //    scope. This means that running transforms -- even when we're doing
+      //    source-to-source compilation that emits handlebars and not wire
+      //    format -- implies changing .hbs files into .js files.
+      //
+      // 3. So stage1 may need to rewrite .hbs to .hbs.js (to avoid colliding
+      //    with an existing co-located .js file).
+      //
+      // 4. But stage1 doesn't necessarily want to run babel over the
+      //    corresponding JS file. Most of the time, that's just an
+      //    unnecessarily expensive second parse. (We only run it in stage1 to
+      //    eliminate an addon's custom babel plugins, and many addons don't
+      //    have any.)
+      //
+      // 5. Therefore, the work of template-colocation gets defered until here,
+      //    and it may see co-located templates named `.hbs.js` instead of the
+      //    usual `.hbs.
+      templateExtensions: ['.hbs', '.hbs.js'],
+
+      // All of the above only applies to auto-upgraded packages that were
+      // authored in v1. V2 packages don't get any of this complexity, they're
+      // supposed to take care of colocating their own templates explicitly.
+      packageGuard: true,
     };
     babel.plugins.push([
       require.resolve('@embroider/shared-internals/src/template-colocation-plugin'),
@@ -441,7 +439,7 @@ export class AppBuilder<TreeNames> {
     let relocatedFiles: AdjustImportsOptions['relocatedFiles'] = {};
     for (let { destPath, appFiles } of engines) {
       for (let [relativePath, originalPath] of appFiles.relocatedFiles) {
-        relocatedFiles[join(destPath, relativePath).split(sep).join('/')] = originalPath;
+        relocatedFiles[join(destPath, relativePath)] = originalPath;
       }
     }
     let relocatedFilesPath = join(this.root, '_relocated_files.json');
@@ -896,8 +894,7 @@ export class AppBuilder<TreeNames> {
     let assets = this.gatherAssets(inputPaths);
 
     let finalAssets = await this.updateAssets(assets, appFiles, emberENV);
-    let templateCompiler = this.templateCompiler(emberENV);
-    let babelConfig = this.babelConfig(templateCompiler, appFiles);
+    let babelConfig = this.babelConfig(appFiles);
     this.addBabelConfig(babelConfig);
 
     let assetPaths = assets.map(asset => asset.relativePath);
@@ -950,26 +947,24 @@ export class AppBuilder<TreeNames> {
     return combinePackageJSON(...pkgLayers);
   }
 
-  private templateCompiler(config: EmberENV): NodeTemplateCompilerParams {
-    let plugins = this.adapter.htmlbarsPlugins();
-    if (!plugins.ast) {
-      plugins.ast = [];
-    }
-    let { plugins: macroPlugins, setConfig } = MacrosConfig.astPlugins();
+  private etcOptions(): EtcOptions {
+    let transforms = this.adapter.htmlbarsPlugins();
+
+    let { plugins: macroPlugins, setConfig } = MacrosConfig.transforms();
     setConfig(this.macrosConfig);
     for (let macroPlugin of macroPlugins) {
-      plugins.ast.push(macroPlugin);
+      transforms.push(macroPlugin as any);
     }
 
-    const compilerPath = resolve.sync(this.adapter.templateCompilerPath(), { basedir: this.root });
-    const compilerChecksum = getEmberExports(compilerPath).cacheKey;
+    let transform = this.adapter.resolverTransform();
+    if (transform) {
+      transforms.push(transform);
+    }
 
     return {
-      plugins,
-      compilerPath,
-      compilerChecksum,
-      resolver: this.adapter.templateResolver(),
-      EmberENV: config,
+      transforms,
+      compilerPath: resolve.sync(this.adapter.templateCompilerPath(), { basedir: this.root }),
+      enableLegacyModules: ['ember-cli-htmlbars', 'ember-cli-htmlbars-inline-precompile', 'htmlbars-inline-precompile'],
     };
   }
 
@@ -1099,11 +1094,7 @@ export class AppBuilder<TreeNames> {
   private get staticAppPathsPattern(): RegExp | undefined {
     if (this.options.staticAppPaths.length > 0) {
       return new RegExp(
-        '^(?:' +
-          this.options.staticAppPaths.map(staticAppPath => escapeRegExp(staticAppPath.replace(/\//g, sep))).join('|') +
-          ')(?:$|' +
-          sep +
-          ')'
+        '^(?:' + this.options.staticAppPaths.map(staticAppPath => escapeRegExp(staticAppPath)).join('|') + ')(?:$|/)'
       );
     }
   }

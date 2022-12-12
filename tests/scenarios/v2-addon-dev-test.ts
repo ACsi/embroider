@@ -7,13 +7,10 @@ import { ExpectFile, expectFilesAt } from '@embroider/test-support';
 
 const { module: Qmodule, test } = QUnit;
 
-/**
- * The type of addon this is testing with only works in
- * ember-source@3.25+
- */
 appScenarios
-  .skip('lts_3_16')
-  .skip('lts_3_24')
+  // we are primarily interested in the v2 addon build, we don't need to repeat
+  // it per host-app version
+  .only('release')
   .map('v2-addon-dev-js', async project => {
     let addon = baseV2Addon();
     addon.pkg.name = 'v2-addon';
@@ -37,8 +34,10 @@ appScenarios
           ],
           "plugins": [
             "@embroider/addon-dev/template-colocation-plugin",
-            ["@embroider/addon-dev/template-transform-plugin", {
-              astTransforms: [
+            ["babel-plugin-ember-template-compilation", {
+              targetFormat: 'hbs',
+              compilerPath: 'ember-source/dist/ember-template-compiler',
+              transforms: [
                 './lib/custom-transform.js',
               ],
             }],
@@ -146,6 +145,7 @@ appScenarios
 
     addon.linkDependency('@embroider/addon-shim', { baseDir: __dirname });
     addon.linkDependency('@embroider/addon-dev', { baseDir: __dirname });
+    addon.linkDependency('babel-plugin-ember-template-compilation', { baseDir: __dirname });
     addon.linkDevDependency('@babel/core', { baseDir: __dirname });
     addon.linkDevDependency('@babel/plugin-proposal-class-properties', { baseDir: __dirname });
     addon.linkDevDependency('@babel/plugin-proposal-decorators', { baseDir: __dirname });
@@ -244,7 +244,7 @@ appScenarios
         test('template transform was run', async function () {
           expectFile('dist/components/demo/index.js').matches('iWasTransformed');
           expectFile('dist/components/demo/index.js').matches(
-            /TEMPLATE = hbs\("Hello there/,
+            /TEMPLATE = precompileTemplate\("Hello there/,
             'template is still in hbs format'
           );
         });

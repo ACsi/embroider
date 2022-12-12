@@ -5,8 +5,6 @@ import merge from 'lodash/merge';
 const { module: Qmodule, test } = QUnit;
 
 tsAppScenarios
-  .skip('lts_3_16')
-  .skip('lts_3_24')
   .map('typescript-app', project => {
     merge(project.files, {
       app: {
@@ -75,6 +73,11 @@ tsAppScenarios
 
       test(`yarn ember test`, async function (assert) {
         let result = await app.execute(`ember test`);
+        assert.equal(result.exitCode, 0, result.output);
+      });
+
+      test(`check types`, async function (assert) {
+        let result = await app.execute(`yarn tsc`);
         assert.equal(result.exitCode, 0, result.output);
       });
     });
